@@ -1,294 +1,292 @@
-"""
-百度资讯抓取 - 核心爬虫模块
-"""
-
 import requests
 from bs4 import BeautifulSoup
-import time
-import random
-from datetime import datetime, timedelta
-from urllib.parse import quote
+from urllib.parse import urljoin, urlparse
+import re
+from typing import Tuple, List, Dict, Optional
 
+BROWSER_HEADERS = {
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
+    "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
+    "Accept-Encoding": "gzip, deflate",
+    "Connection": "keep-alive",
+    "Upgrade-Insecure-Requests": "1",
+    "Cache-Control": "max-age=0",
+}
 
-USER_AGENTS = [
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.5 Safari/605.1.15",
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 Edg/125.0.0.0",
-    "Mozilla/5.0 (Macintosh; Intel Mac OS X 10.15; rv:126.0) Gecko/20100101 Firefox/126.0",
-    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+BAIDU_HEADERS = {
+    **BROWSER_HEADERS,
+    "Referer": "https://www.baidu.com/",
+}
+
+TIME_PATTERNS = [
+    r'刚刚',
+    r'\d+分钟前',
+    r'\d+小时前',
+    r'昨天\d{0,2}:\d{0,2}',
+    r'昨天',
+    r'前天\d{0,2}:\d{0,2}',
+    r'前天',
+    r'\d+天前',
+    r'\d{1,2}月\d{1,2}日',
+    r'\d{4}年\d{1,2}月\d{1,2}日',
 ]
 
 
-def get_random_headers():
-    return {
-        "User-Agent": random.choice(USER_AGENTS),
-        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8",
-        "Accept-Language": "zh-CN,zh;q=0.9,en;q=0.8",
-        "Accept-Encoding": "gzip, deflate",
-        "Referer": "https://www.baidu.com/",
-        "Connection": "keep-alive",
-        "Cache-Control": "max-age=0",
-        "Sec-Fetch-Dest": "document",
-        "Sec-Fetch-Mode": "navigate",
-        "Sec-Fetch-Site": "same-site",
-        "Sec-Fetch-User": "?1",
-        "Upgrade-Insecure-Requests": "1",
-    }
+def is_valid_news_url(href: str) -> bool:
+    if not href:
+        return False
+
+    # 百家号
+    if "baijiahao.baidu.com" in href:
+        return True
+
+    # 百度跳转链接
+    if "/link?" in href and "url=" in href:
+        return True
+
+    parsed = urlparse(href)
+
+    # 过滤百度站内搜索/热榜/推荐
+    if "baidu.com" in parsed.netloc:
+        return False
+
+    # 外部站点
+    if parsed.scheme in ("http", "https") and parsed.netloc:
+        return True
+
+    return False
 
 
-def random_delay(min_sec=2, max_sec=5):
-    delay = random.uniform(min_sec, max_sec)
-    if random.random() < 0.1:
-        delay += random.uniform(3, 8)
-    time.sleep(delay)
+def extract_time_and_source(text: str) -> Tuple[str, str]:
+    if not text:
+        return "", ""
+
+    clean_text = re.sub(r'\s+', ' ', text).strip()
+
+    for pattern in TIME_PATTERNS:
+        match = re.search(pattern, clean_text)
+        if match:
+            time_str = match.group(0)
+            source = clean_text.replace(time_str, "").strip(" -_|·")
+            return time_str, source
+
+    return "", clean_text
 
 
-def is_blocked(html):
-    html_lower = html.lower()
-    signals = [
-        "验证码",
-        "安全验证",
-        "百度安全验证",
-        "captcha",
-        "abnormal",
-        "请输入验证码",
-        "访问过于频繁",
-        "verify",
-    ]
-    return any(s.lower() in html_lower for s in signals)
-
-
-def extract_results_from_soup(soup):
-    """
-    从页面中提取搜索结果
-    直接通过 h3 a 定位新闻标题和链接，再向上找父容器提取来源和时间
-    """
+def extract_results_from_soup(soup: BeautifulSoup, base_url: str) -> List[Dict]:
     results = []
-    seen_urls = set()
+    seen = set()
 
-    for h3_link in soup.select("h3 a"):
-        try:
-            title = h3_link.get_text(strip=True)
-            result_url = h3_link.get("href", "").strip()
+    # 只抓左侧主结果区
+    content_left = soup.find("div", id="content_left")
+    if not content_left:
+        return results
 
-            if not title or not result_url:
-                continue
+    # 多种候选容器，尽量兼容百度资讯页不同块
+    containers = []
 
-            if result_url.startswith("javascript:"):
-                continue
+    selectors = [
+        'div.result',
+        'div.result-op',
+        'div.c-container',
+        'div[data-log]',
+    ]
 
-            if result_url in seen_urls:
-                continue
-            seen_urls.add(result_url)
+    for selector in selectors:
+        containers.extend(content_left.select(selector))
 
-            source = ""
-            pub_time = ""
-            snippet = ""
+    # 去重容器，保留页面顺序
+    deduped_containers = []
+    container_seen = set()
+    for c in containers:
+        cid = id(c)
+        if cid not in container_seen:
+            container_seen.add(cid)
+            deduped_containers.append(c)
 
-            # 向上找父容器
-            container = h3_link.find_parent("div", class_=["result", "result-op", "c-container"])
-            if not container:
-                container = h3_link.find_parent("div")
+    for container in deduped_containers:
+        title = ""
+        href = ""
+        snippet = ""
+        source = ""
+        time_str = ""
 
-            if container:
-                # 提取来源和时间
-                author_elem = container.select_one(
-                    "span.c-color-gray, span.f-author, p.c-author, span.c-color-gray2, div.c-span-last span"
-                )
-                if author_elem:
-                    author_text = author_elem.get_text(" ", strip=True).replace("\xa0", " ")
-                    parts = author_text.split()
-                    if len(parts) >= 2:
-                        source = parts[0]
-                        pub_time = " ".join(parts[1:])
-                    elif parts:
-                        source = parts[0]
+        # 1. 优先找 h3 a
+        a_tag = None
+        h3 = container.find("h3")
+        if h3:
+            a_tag = h3.find("a", href=True)
 
-                # 提取摘要
-                snippet_elem = container.select_one(
-                    "div.c-abstract, span.c-font-normal, span.c-color-text, div.c-summary, div.c-span-last p, span.content-right_8Zs40"
-                )
-                if snippet_elem:
-                    snippet = snippet_elem.get_text(" ", strip=True)[:200]
+        # 2. 如果没有 h3 a，再找第一个较像标题的链接
+        if not a_tag:
+            all_links = container.find_all("a", href=True)
+            for link in all_links:
+                txt = link.get_text(" ", strip=True)
+                href_candidate = link.get("href", "")
+                if len(txt) >= 8 and is_valid_news_url(href_candidate):
+                    a_tag = link
+                    break
 
-            results.append({
-                "title": title[:200],
-                "url": result_url,
-                "source": source[:100],
-                "time": pub_time[:100],
-                "snippet": snippet,
-                "content_status": "success",
-            })
-
-        except Exception:
+        if not a_tag:
             continue
 
+        href = a_tag.get("href", "").strip()
+        title = a_tag.get_text(" ", strip=True).strip()
+
+        if not title or len(title) < 5:
+            continue
+
+        if not is_valid_news_url(href):
+            continue
+
+        # 摘要提取
+        snippet_candidates = []
+
+        for sel in [
+            'div.c-abstract',
+            'span.content-right_8Zs40',
+            'div.c-span9',
+            'div.c-font-normal',
+            'div[class*="summary"]',
+            'p',
+        ]:
+            snippet_candidates.extend(container.select(sel))
+
+        for elem in snippet_candidates:
+            txt = elem.get_text(" ", strip=True)
+            if txt and len(txt) > 20 and txt != title:
+                snippet = txt
+                break
+
+        # 时间/来源提取
+        meta_texts = []
+
+        for sel in [
+            'span',
+            'a.c-showurl',
+            'span.c-showurl',
+            'span.source_1Vdap',
+            'div[class*="source"]',
+            'div[class*="time"]',
+        ]:
+            for elem in container.select(sel):
+                txt = elem.get_text(" ", strip=True)
+                if txt and len(txt) <= 40:
+                    meta_texts.append(txt)
+
+        # 去重保序
+        uniq_meta = []
+        meta_seen = set()
+        for t in meta_texts:
+            if t not in meta_seen:
+                meta_seen.add(t)
+                uniq_meta.append(t)
+
+        for t in uniq_meta:
+            found_time, found_source = extract_time_and_source(t)
+            if found_time and not time_str:
+                time_str = found_time
+            if found_source and not source and found_source != time_str:
+                source = found_source
+
+        # 如果 source 还是空，但 snippet 开头像“昨天18:46 ...”
+        if not time_str and snippet:
+            found_time, found_source = extract_time_and_source(snippet[:40])
+            if found_time:
+                time_str = found_time
+                if found_source and not source:
+                    source = found_source
+
+        key = (title, href)
+        if key in seen:
+            continue
+        seen.add(key)
+
+        results.append({
+            "title": title,
+            "url": urljoin(base_url, href),
+            "source": source,
+            "time": time_str,
+            "snippet": snippet,
+        })
+
     return results
 
 
-def search_baidu_news(keyword: str, days: int = 7, max_pages: int = 3, debug: bool = False):
-    session = requests.Session()
-    session.headers.update(get_random_headers())
+def is_within_days(time_str: str, days: int) -> bool:
+    if not time_str:
+        return True
+
+    time_str = time_str.strip()
+
+    if "刚刚" in time_str or "分钟前" in time_str or "小时前" in time_str:
+        return True
+
+    if "昨天" in time_str:
+        return days >= 1
+
+    if "前天" in time_str:
+        return days >= 2
+
+    m = re.search(r'(\d+)\s*天前', time_str)
+    if m:
+        return int(m.group(1)) <= days
+
+    # 月日格式先保留
+    if re.search(r'\d{1,2}月\d{1,2}日', time_str):
+        return True
+
+    return True
+
+
+def search_baidu_news(keyword: str, days: int = 7, debug: bool = False) -> Tuple[List[Dict], Optional[Dict]]:
+    baidu_url = f"https://www.baidu.com/s?wd={keyword}&tn=news&rtt=1&bsst=1&cl=2"
 
     debug_info = {
-        "keyword": keyword,
-        "days": days,
-        "max_pages": max_pages,
-        "pages": [],
-        "total_results": 0,
+        "url": baidu_url,
+        "page_title": None,
+        "content_left_exists": False,
+        "container_count": 0,
+        "result_count": 0,
     }
 
     try:
-        warmup_resp = session.get("https://www.baidu.com", timeout=10)
-        if debug:
-            debug_info["warmup"] = {
-                "status_code": warmup_resp.status_code,
-                "final_url": warmup_resp.url,
-            }
-        time.sleep(random.uniform(1, 2))
-    except Exception as e:
-        if debug:
-            debug_info["warmup_error"] = str(e)
-
-    end_time = datetime.now()
-    start_time = end_time - timedelta(days=days)
-    start_ts = int(start_time.timestamp())
-    end_ts = int(end_time.timestamp())
-
-    all_results = []
-    all_seen_urls = set()
-
-    print(f"开始搜索: {keyword} | 近 {days} 天 | 最多 {max_pages} 页")
-
-    for page in range(max_pages):
-        session.headers["User-Agent"] = random.choice(USER_AGENTS)
-
-        encoded_keyword = quote(keyword)
-        url = (
-            f"https://www.baidu.com/s?"
-            f"wd={encoded_keyword}&tn=news"
-            f"&rtt=4&bsst=1&cl=2&medium=0"
-            f"&gpc=stf%3D{start_ts}%2C{end_ts}%7Cstftype%3D2"
-            f"&pn={page * 10}"
+        session = requests.Session()
+        response = session.get(
+            baidu_url,
+            headers=BAIDU_HEADERS,
+            timeout=20,
+            allow_redirects=True,
         )
+        response.encoding = response.apparent_encoding or "utf-8"
 
-        page_debug = {
-            "page": page + 1,
-            "request_url": url,
-        }
+        if response.status_code != 200:
+            return [], {"error": f"HTTP {response.status_code}", **debug_info}
 
-        try:
-            resp = session.get(url, timeout=15, allow_redirects=True)
-            resp.encoding = resp.apparent_encoding or "utf-8"
+        html = response.text
+        soup = BeautifulSoup(html, "lxml")
 
-            soup = BeautifulSoup(resp.text, "lxml")
-            page_title = ""
-            if soup.title:
-                page_title = soup.title.get_text(strip=True)
-            blocked = is_blocked(resp.text)
+        if "访问频率过高" in html or "验证码" in html:
+            return [], {"error": "blocked", **debug_info}
 
-            page_results = extract_results_from_soup(soup)
+        content_left = soup.find("div", id="content_left")
 
-            # 去重
-            new_results = []
-            for item in page_results:
-                if item["url"] not in all_seen_urls:
-                    all_seen_urls.add(item["url"])
-                    new_results.append(item)
+        if debug:
+            debug_info["page_title"] = soup.title.string if soup.title else None
+            debug_info["content_left_exists"] = content_left is not None
+            if content_left:
+                debug_info["container_count"] = len(content_left.find_all(["div"]))
 
-            page_debug.update({
-                "status_code": resp.status_code,
-                "final_url": resp.url,
-                "page_title": page_title,
-                "blocked": blocked,
-                "h3_link_count": len(soup.select("h3 a")),
-                "parsed_count": len(new_results),
-                "html_length": len(resp.text),
-                "html_preview": resp.text[:2000],
-            })
+        results = extract_results_from_soup(soup, baidu_url)
 
-            if blocked:
-                print(f"第 {page + 1} 页疑似被拦截")
-                if debug:
-                    debug_info["pages"].append(page_debug)
-                if page < max_pages - 1:
-                    time.sleep(random.uniform(15, 30))
-                continue
+        if days > 0:
+            results = [r for r in results if is_within_days(r.get("time", "") or r.get("source", ""), days)]
 
-            all_results.extend(new_results)
-            print(f"第 {page + 1} 页: {len(new_results)} 条")
+        if debug:
+            debug_info["result_count"] = len(results)
 
-            if debug:
-                debug_info["pages"].append(page_debug)
+        return results, debug_info
 
-            if page < max_pages - 1:
-                random_delay(3, 6)
-
-        except requests.RequestException as e:
-            page_debug["request_error"] = str(e)
-            print(f"第 {page + 1} 页请求失败: {e}")
-            if debug:
-                debug_info["pages"].append(page_debug)
-            time.sleep(random.uniform(5, 10))
-
-        except Exception as e:
-            page_debug["parse_error"] = str(e)
-            print(f"第 {page + 1} 页解析失败: {e}")
-            if debug:
-                debug_info["pages"].append(page_debug)
-
-    debug_info["total_results"] = len(all_results)
-    print(f"搜索完成，共 {len(all_results)} 条")
-
-    return all_results, debug_info if debug else None
-
-
-def fetch_article_content(url: str, max_length: int = 500):
-    headers = {"User-Agent": random.choice(USER_AGENTS)}
-
-    try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        resp.encoding = resp.apparent_encoding or "utf-8"
-
-        soup = BeautifulSoup(resp.text, "lxml")
-
-        for tag in soup(["script", "style", "nav", "header", "footer", "aside", "iframe"]):
-            tag.decompose()
-
-        paragraphs = soup.find_all("p")
-        content = "\n".join([
-            p.get_text(strip=True)
-            for p in paragraphs
-            if len(p.get_text(strip=True)) > 20
-        ])
-
-        if len(content) < 50:
-            body = soup.find("body")
-            if body:
-                content = body.get_text(strip=True)[:max_length]
-
-        if content:
-            return content[:max_length], "success"
-        else:
-            return "", "failed"
-
-    except Exception:
-        return "", "failed"
-
-
-def fetch_all_contents(results: list, max_length: int = 500):
-    total = len(results)
-    print(f"开始抓取正文，共 {total} 条")
-
-    for i, item in enumerate(results):
-        print(f"  [{i + 1}/{total}] {item['title'][:30]}...")
-        content, status = fetch_article_content(item["url"], max_length)
-        item["content"] = content
-        item["content_status"] = status
-
-        if i < total - 1:
-            random_delay(1, 3)
-
-    print("正文抓取完成")
-    return results
+    except Exception as e:
+        return [], {"error": str(e), **debug_info}
