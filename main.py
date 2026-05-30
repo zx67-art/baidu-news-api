@@ -74,6 +74,9 @@ async def search(request: SearchRequest):
         debug=request.debug
     )
 
+    # 可选：先限制前10条，避免太慢
+    results = results[:10]
+
     if debug_info and debug_info.get("error"):
         if debug_info["error"] == "blocked":
             search_status = "blocked"
