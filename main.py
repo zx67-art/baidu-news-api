@@ -1,4 +1,3 @@
-cat << 'ENDOFFILE' > /Users/bytedance/projects/baidu-news-api/main.py
 """
 百度资讯抓取 API - FastAPI 入口
 """
@@ -63,18 +62,6 @@ def root():
         "status": "ok",
         "service": "百度资讯抓取 API",
         "version": "2.0.0",
-        "endpoints": {
-            "POST /search": "搜索百度资讯",
-            "GET /health": "健康检查",
-        },
-        "usage": {
-            "keyword": "搜索关键词（必填）",
-            "days": "搜索近 N 天，默认 7",
-            "max_pages": "最大翻页数，默认 10（约 100 条）",
-            "fetch_content": "是否抓取正文，默认 true",
-            "content_length": "正文最大长度，默认 500",
-            "debug": "是否返回调试信息，默认 false"
-        }
     }
 
 
@@ -164,4 +151,3 @@ def search(req: SearchRequest):
 if __name__ == "__main__":
     import uvicorn
     uvicorn.run(app, host="0.0.0.0", port=8000)
-ENDOFFILE
