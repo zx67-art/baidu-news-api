@@ -3,6 +3,7 @@ from bs4 import BeautifulSoup
 from urllib.parse import urljoin, urlparse
 import re
 from typing import Tuple, List, Dict, Optional
+from datetime import date
 
 BROWSER_HEADERS = {
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
@@ -30,6 +31,8 @@ TIME_PATTERNS = [
     r'\d+天前',
     r'\d{1,2}月\d{1,2}日',
     r'\d{4}年\d{1,2}月\d{1,2}日',
+    r'\d{4}-\d{1,2}-\d{1,2}',
+    r'\d{4}年',
 ]
 
 
@@ -47,7 +50,7 @@ def is_valid_news_url(href: str) -> bool:
 
     parsed = urlparse(href)
 
-    # 过滤百度站内搜索/热榜/推荐
+    # 过滤百度站内搜索、热榜、推荐
     if "baidu.com" in parsed.netloc:
         return False
 
@@ -74,6 +77,100 @@ def extract_time_and_source(text: str) -> Tuple[str, str]:
     return "", clean_text
 
 
+def parse_time_to_days_ago(time_str: str) -> Optional[int]:
+    """
+    把百度资讯时间字符串转成“距离今天多少天”
+    返回:
+      0 = 今天
+      1 = 昨天
+      2 = 前天
+      ...
+      None = 无法解析
+    """
+    if not time_str:
+        return None
+
+    time_str = time_str.strip()
+    today = date.today()
+
+    # 刚刚 / 分钟 / 小时 => 都算今天
+    if "刚刚" in time_str or "分钟前" in time_str or "小时前" in time_str:
+        return 0
+
+    # 昨天 / 前天
+    if "昨天" in time_str:
+        return 1
+    if "前天" in time_str:
+        return 2
+
+    # X天前
+    m = re.search(r'(\d+)\s*天前', time_str)
+    if m:
+        return int(m.group(1))
+
+    # YYYY年MM月DD日
+    m = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', time_str)
+    if m:
+        try:
+            y, mo, d = map(int, m.groups())
+            dt = date(y, mo, d)
+            return (today - dt).days
+        except ValueError:
+            return None
+
+    # YYYY-MM-DD
+    m = re.search(r'(\d{4})-(\d{1,2})-(\d{1,2})', time_str)
+    if m:
+        try:
+            y, mo, d = map(int, m.groups())
+            dt = date(y, mo, d)
+            return (today - dt).days
+        except ValueError:
+            return None
+
+    # MM月DD日（默认按当年处理）
+    m = re.search(r'(\d{1,2})月(\d{1,2})日', time_str)
+    if m:
+        try:
+            mo, d = map(int, m.groups())
+            dt = date(today.year, mo, d)
+
+            # 如果比今天还大，说明是去年的日期
+            if dt > today:
+                dt = date(today.year - 1, mo, d)
+
+            return (today - dt).days
+        except ValueError:
+            return None
+
+    # 单独年份：2024年 / 2023年
+    m = re.search(r'(\d{4})年', time_str)
+    if m:
+        try:
+            y = int(m.group(1))
+            dt = date(y, 1, 1)
+            return (today - dt).days
+        except ValueError:
+            return None
+
+    return None
+
+
+def is_within_days(time_str: str, days: int) -> bool:
+    """
+    判断时间是否在最近 days 天内
+    没时间或解析失败一律丢弃，避免旧新闻混入
+    """
+    if not time_str:
+        return False
+
+    days_ago = parse_time_to_days_ago(time_str)
+    if days_ago is None:
+        return False
+
+    return 0 <= days_ago <= days
+
+
 def extract_results_from_soup(soup: BeautifulSoup, base_url: str) -> List[Dict]:
     results = []
     seen = set()
@@ -83,7 +180,6 @@ def extract_results_from_soup(soup: BeautifulSoup, base_url: str) -> List[Dict]:
     if not content_left:
         return results
 
-    # 多种候选容器，尽量兼容百度资讯页不同块
     containers = []
 
     selectors = [
@@ -96,7 +192,7 @@ def extract_results_from_soup(soup: BeautifulSoup, base_url: str) -> List[Dict]:
     for selector in selectors:
         containers.extend(content_left.select(selector))
 
-    # 去重容器，保留页面顺序
+    # 去重容器，保序
     deduped_containers = []
     container_seen = set()
     for c in containers:
@@ -112,13 +208,13 @@ def extract_results_from_soup(soup: BeautifulSoup, base_url: str) -> List[Dict]:
         source = ""
         time_str = ""
 
-        # 1. 优先找 h3 a
+        # 优先找 h3 a
         a_tag = None
         h3 = container.find("h3")
         if h3:
             a_tag = h3.find("a", href=True)
 
-        # 2. 如果没有 h3 a，再找第一个较像标题的链接
+        # 找不到就找第一个像标题的链接
         if not a_tag:
             all_links = container.find_all("a", href=True)
             for link in all_links:
@@ -159,7 +255,7 @@ def extract_results_from_soup(soup: BeautifulSoup, base_url: str) -> List[Dict]:
                 snippet = txt
                 break
 
-        # 时间/来源提取
+        # 收集候选元信息（时间/来源）
         meta_texts = []
 
         for sel in [
@@ -172,7 +268,7 @@ def extract_results_from_soup(soup: BeautifulSoup, base_url: str) -> List[Dict]:
         ]:
             for elem in container.select(sel):
                 txt = elem.get_text(" ", strip=True)
-                if txt and len(txt) <= 40:
+                if txt and len(txt) <= 50:
                     meta_texts.append(txt)
 
         # 去重保序
@@ -190,13 +286,16 @@ def extract_results_from_soup(soup: BeautifulSoup, base_url: str) -> List[Dict]:
             if found_source and not source and found_source != time_str:
                 source = found_source
 
-        # 如果 source 还是空，但 snippet 开头像“昨天18:46 ...”
+        # 如果 time 还没拿到，尝试从 snippet 前半段提取
         if not time_str and snippet:
-            found_time, found_source = extract_time_and_source(snippet[:40])
+            found_time, found_source = extract_time_and_source(snippet[:60])
             if found_time:
                 time_str = found_time
                 if found_source and not source:
                     source = found_source
+
+        # 时间过滤：没有明确时间 / 不是最近 days 的，先在这里不处理
+        # 统一留给 search_baidu_news 处理
 
         key = (title, href)
         if key in seen:
@@ -212,32 +311,6 @@ def extract_results_from_soup(soup: BeautifulSoup, base_url: str) -> List[Dict]:
         })
 
     return results
-
-
-def is_within_days(time_str: str, days: int) -> bool:
-    if not time_str:
-        return True
-
-    time_str = time_str.strip()
-
-    if "刚刚" in time_str or "分钟前" in time_str or "小时前" in time_str:
-        return True
-
-    if "昨天" in time_str:
-        return days >= 1
-
-    if "前天" in time_str:
-        return days >= 2
-
-    m = re.search(r'(\d+)\s*天前', time_str)
-    if m:
-        return int(m.group(1)) <= days
-
-    # 月日格式先保留
-    if re.search(r'\d{1,2}月\d{1,2}日', time_str):
-        return True
-
-    return True
 
 
 def search_baidu_news(keyword: str, days: int = 7, debug: bool = False) -> Tuple[List[Dict], Optional[Dict]]:
@@ -280,8 +353,28 @@ def search_baidu_news(keyword: str, days: int = 7, debug: bool = False) -> Tuple
 
         results = extract_results_from_soup(soup, baidu_url)
 
-        if days > 0:
-            results = [r for r in results if is_within_days(r.get("time", "") or r.get("source", ""), days)]
+        # 严格按时间过滤：time 优先，其次 source，再其次 snippet
+        filtered_results = []
+        for r in results:
+            candidate_time = r.get("time", "") or ""
+
+            if not candidate_time:
+                # source 里可能混有时间
+                found_time, _ = extract_time_and_source(r.get("source", "") or "")
+                if found_time:
+                    candidate_time = found_time
+
+            if not candidate_time:
+                # snippet 开头也可能带时间
+                found_time, _ = extract_time_and_source((r.get("snippet", "") or "")[:60])
+                if found_time:
+                    candidate_time = found_time
+
+            if is_within_days(candidate_time, days):
+                r["time"] = candidate_time
+                filtered_results.append(r)
+
+        results = filtered_results
 
         if debug:
             debug_info["result_count"] = len(results)
