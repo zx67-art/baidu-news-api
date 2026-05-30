@@ -40,21 +40,17 @@ def is_valid_news_url(href: str) -> bool:
     if not href:
         return False
 
-    # 百家号
     if "baijiahao.baidu.com" in href:
         return True
 
-    # 百度跳转链接
     if "/link?" in href and "url=" in href:
         return True
 
     parsed = urlparse(href)
 
-    # 过滤百度站内搜索、热榜、推荐
     if "baidu.com" in parsed.netloc:
         return False
 
-    # 外部站点
     if parsed.scheme in ("http", "https") and parsed.netloc:
         return True
 
@@ -78,37 +74,25 @@ def extract_time_and_source(text: str) -> Tuple[str, str]:
 
 
 def parse_time_to_days_ago(time_str: str) -> Optional[int]:
-    """
-    把百度资讯时间字符串转成“距离今天多少天”
-    返回:
-      0 = 今天
-      1 = 昨天
-      2 = 前天
-      ...
-      None = 无法解析
-    """
     if not time_str:
         return None
 
     time_str = time_str.strip()
     today = date.today()
 
-    # 刚刚 / 分钟 / 小时 => 都算今天
     if "刚刚" in time_str or "分钟前" in time_str or "小时前" in time_str:
         return 0
 
-    # 昨天 / 前天
     if "昨天" in time_str:
         return 1
+
     if "前天" in time_str:
         return 2
 
-    # X天前
     m = re.search(r'(\d+)\s*天前', time_str)
     if m:
         return int(m.group(1))
 
-    # YYYY年MM月DD日
     m = re.search(r'(\d{4})年(\d{1,2})月(\d{1,2})日', time_str)
     if m:
         try:
@@ -118,7 +102,6 @@ def parse_time_to_days_ago(time_str: str) -> Optional[int]:
         except ValueError:
             return None
 
-    # YYYY-MM-DD
     m = re.search(r'(\d{4})-(\d{1,2})-(\d{1,2})', time_str)
     if m:
         try:
@@ -128,22 +111,17 @@ def parse_time_to_days_ago(time_str: str) -> Optional[int]:
         except ValueError:
             return None
 
-    # MM月DD日（默认按当年处理）
     m = re.search(r'(\d{1,2})月(\d{1,2})日', time_str)
     if m:
         try:
             mo, d = map(int, m.groups())
             dt = date(today.year, mo, d)
-
-            # 如果比今天还大，说明是去年的日期
             if dt > today:
                 dt = date(today.year - 1, mo, d)
-
             return (today - dt).days
         except ValueError:
             return None
 
-    # 单独年份：2024年 / 2023年
     m = re.search(r'(\d{4})年', time_str)
     if m:
         try:
@@ -156,10 +134,12 @@ def parse_time_to_days_ago(time_str: str) -> Optional[int]:
     return None
 
 
-def is_within_days(time_str: str, days: int) -> bool:
+def is_old_news(time_str: str, days: int) -> bool:
     """
-    判断时间是否在最近 days 天内
-    没时间或解析失败一律丢弃，避免旧新闻混入
+    只判断是否明确为旧闻
+    - 明确超过 days 天 => True
+    - 明确在 days 天内 => False
+    - 无法判断 => False（保留）
     """
     if not time_str:
         return False
@@ -168,14 +148,13 @@ def is_within_days(time_str: str, days: int) -> bool:
     if days_ago is None:
         return False
 
-    return 0 <= days_ago <= days
+    return days_ago > days
 
 
 def extract_results_from_soup(soup: BeautifulSoup, base_url: str) -> List[Dict]:
     results = []
     seen = set()
 
-    # 只抓左侧主结果区
     content_left = soup.find("div", id="content_left")
     if not content_left:
         return results
@@ -192,7 +171,6 @@ def extract_results_from_soup(soup: BeautifulSoup, base_url: str) -> List[Dict]:
     for selector in selectors:
         containers.extend(content_left.select(selector))
 
-    # 去重容器，保序
     deduped_containers = []
     container_seen = set()
     for c in containers:
@@ -208,13 +186,11 @@ def extract_results_from_soup(soup: BeautifulSoup, base_url: str) -> List[Dict]:
         source = ""
         time_str = ""
 
-        # 优先找 h3 a
         a_tag = None
         h3 = container.find("h3")
         if h3:
             a_tag = h3.find("a", href=True)
 
-        # 找不到就找第一个像标题的链接
         if not a_tag:
             all_links = container.find_all("a", href=True)
             for link in all_links:
@@ -236,7 +212,6 @@ def extract_results_from_soup(soup: BeautifulSoup, base_url: str) -> List[Dict]:
         if not is_valid_news_url(href):
             continue
 
-        # 摘要提取
         snippet_candidates = []
 
         for sel in [
@@ -255,7 +230,6 @@ def extract_results_from_soup(soup: BeautifulSoup, base_url: str) -> List[Dict]:
                 snippet = txt
                 break
 
-        # 收集候选元信息（时间/来源）
         meta_texts = []
 
         for sel in [
@@ -271,7 +245,6 @@ def extract_results_from_soup(soup: BeautifulSoup, base_url: str) -> List[Dict]:
                 if txt and len(txt) <= 50:
                     meta_texts.append(txt)
 
-        # 去重保序
         uniq_meta = []
         meta_seen = set()
         for t in meta_texts:
@@ -286,16 +259,12 @@ def extract_results_from_soup(soup: BeautifulSoup, base_url: str) -> List[Dict]:
             if found_source and not source and found_source != time_str:
                 source = found_source
 
-        # 如果 time 还没拿到，尝试从 snippet 前半段提取
         if not time_str and snippet:
             found_time, found_source = extract_time_and_source(snippet[:60])
             if found_time:
                 time_str = found_time
                 if found_source and not source:
                     source = found_source
-
-        # 时间过滤：没有明确时间 / 不是最近 days 的，先在这里不处理
-        # 统一留给 search_baidu_news 处理
 
         key = (title, href)
         if key in seen:
@@ -353,25 +322,26 @@ def search_baidu_news(keyword: str, days: int = 7, debug: bool = False) -> Tuple
 
         results = extract_results_from_soup(soup, baidu_url)
 
-        # 严格按时间过滤：time 优先，其次 source，再其次 snippet
         filtered_results = []
+
         for r in results:
             candidate_time = r.get("time", "") or ""
 
             if not candidate_time:
-                # source 里可能混有时间
                 found_time, _ = extract_time_and_source(r.get("source", "") or "")
                 if found_time:
                     candidate_time = found_time
 
             if not candidate_time:
-                # snippet 开头也可能带时间
                 found_time, _ = extract_time_and_source((r.get("snippet", "") or "")[:60])
                 if found_time:
                     candidate_time = found_time
 
-            if is_within_days(candidate_time, days):
+            if candidate_time:
                 r["time"] = candidate_time
+
+            # 只过滤明确的旧闻；判断不出来的先保留
+            if not is_old_news(candidate_time, days):
                 filtered_results.append(r)
 
         results = filtered_results
