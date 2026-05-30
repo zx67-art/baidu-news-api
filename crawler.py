@@ -59,45 +59,18 @@ def is_blocked(html):
     return any(s.lower() in html_lower for s in signals)
 
 
-def extract_page_title(soup):
-    if soup.title:
-        return soup.title.get_text(strip=True)
-    return ""
-
-
 def extract_results_from_soup(soup):
+    """
+    从页面中提取搜索结果
+    直接通过 h3 a 定位新闻标题和链接，再向上找父容器提取来源和时间
+    """
     results = []
     seen_urls = set()
-    containers = []
 
-    selectors = [
-        "div.result",
-        "div.result-op",
-        "div.c-container",
-        "div[data-log]",
-    ]
-
-    for selector in selectors:
-        found = soup.select(selector)
-        if found:
-            containers.extend(found)
-
-    unique_containers = []
-    seen_ids = set()
-    for item in containers:
-        marker = str(item)[:200]
-        if marker not in seen_ids:
-            seen_ids.add(marker)
-            unique_containers.append(item)
-
-    for item in unique_containers:
+    for h3_link in soup.select("h3 a"):
         try:
-            title_elem = item.select_one("h3 a, h3.t a, h3.c-title a, a")
-            if not title_elem:
-                continue
-
-            title = title_elem.get_text(strip=True)
-            result_url = title_elem.get("href", "").strip()
+            title = h3_link.get_text(strip=True)
+            result_url = h3_link.get("href", "").strip()
 
             if not title or not result_url:
                 continue
@@ -113,23 +86,31 @@ def extract_results_from_soup(soup):
             pub_time = ""
             snippet = ""
 
-            author_elem = item.select_one(
-                "span.c-color-gray, span.f-author, p.c-author, div.c-summary span, div.c-color-text"
-            )
-            if author_elem:
-                author_text = author_text.get_text(" ", strip=True).replace("\xa0", " ")
-                parts = author_text.split()
-                if len(parts) >= 2:
-                    source = parts[0]
-                    pub_time = " ".join(parts[1:])
-                elif parts:
-                    source = parts[0]
+            # 向上找父容器
+            container = h3_link.find_parent("div", class_=["result", "result-op", "c-container"])
+            if not container:
+                container = h3_link.find_parent("div")
 
-            snippet_elem = item.select_one(
-                "div.c-abstract, span.c-font-normal, span.c-color-text, div.c-summary, div.content-right_8Zs40"
-            )
-            if snippet_elem:
-                snippet = snippet_elem.get_text(" ", strip=True)[:200]
+            if container:
+                # 提取来源和时间
+                author_elem = container.select_one(
+                    "span.c-color-gray, span.f-author, p.c-author, span.c-color-gray2, div.c-span-last span"
+                )
+                if author_elem:
+                    author_text = author_elem.get_text(" ", strip=True).replace("\xa0", " ")
+                    parts = author_text.split()
+                    if len(parts) >= 2:
+                        source = parts[0]
+                        pub_time = " ".join(parts[1:])
+                    elif parts:
+                        source = parts[0]
+
+                # 提取摘要
+                snippet_elem = container.select_one(
+                    "div.c-abstract, span.c-font-normal, span.c-color-text, div.c-summary, div.c-span-last p, span.content-right_8Zs40"
+                )
+                if snippet_elem:
+                    snippet = snippet_elem.get_text(" ", strip=True)[:200]
 
             results.append({
                 "title": title[:200],
@@ -202,28 +183,29 @@ def search_baidu_news(keyword: str, days: int = 7, max_pages: int = 3, debug: bo
             resp.encoding = resp.apparent_encoding or "utf-8"
 
             soup = BeautifulSoup(resp.text, "lxml")
-            page_title = extract_page_title(soup)
+            page_title = ""
+            if soup.title:
+                page_title = soup.title.get_text(strip=True)
             blocked = is_blocked(resp.text)
 
-            raw_results = extract_results_from_soup(soup)
+            page_results = extract_results_from_soup(soup)
 
-            page_results = []
-            for item in raw_results:
-                if item["url"] in all_seen_urls:
-                    continue
-                all_seen_urls.add(item["url"])
-                page_results.append(item)
+            # 去重
+            new_results = []
+            for item in page_results:
+                if item["url"] not in all_seen_urls:
+                    all_seen_urls.add(item["url"])
+                    new_results.append(item)
 
             page_debug.update({
                 "status_code": resp.status_code,
                 "final_url": resp.url,
                 "page_title": page_title,
                 "blocked": blocked,
-                "result_div_count": len(soup.select("div.result")),
-                "container_count": len(soup.select("div.result, div.result-op, div.c-container, div[data-log]")),
                 "h3_link_count": len(soup.select("h3 a")),
-                "parsed_count": len(page_results),
-                "html_preview": resp.text[:500],
+                "parsed_count": len(new_results),
+                "html_length": len(resp.text),
+                "html_preview": resp.text[:2000],
             })
 
             if blocked:
@@ -234,8 +216,8 @@ def search_baidu_news(keyword: str, days: int = 7, max_pages: int = 3, debug: bo
                     time.sleep(random.uniform(15, 30))
                 continue
 
-            all_results.extend(page_results)
-            print(f"第 {page + 1} 页: {len(page_results)} 条")
+            all_results.extend(new_results)
+            print(f"第 {page + 1} 页: {len(new_results)} 条")
 
             if debug:
                 debug_info["pages"].append(page_debug)
