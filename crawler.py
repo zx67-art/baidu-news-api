@@ -1,4 +1,3 @@
-cat << 'ENDOFFILE' > /Users/bytedance/projects/baidu-news-api/crawler.py
 """
 百度资讯抓取 - 核心爬虫模块
 """
@@ -118,7 +117,7 @@ def extract_results_from_soup(soup):
                 "span.c-color-gray, span.f-author, p.c-author, div.c-summary span, div.c-color-text"
             )
             if author_elem:
-                author_text = author_elem.get_text(" ", strip=True).replace("\xa0", " ")
+                author_text = author_text.get_text(" ", strip=True).replace("\xa0", " ")
                 parts = author_text.split()
                 if len(parts) >= 2:
                     source = parts[0]
@@ -179,7 +178,7 @@ def search_baidu_news(keyword: str, days: int = 7, max_pages: int = 3, debug: bo
     all_results = []
     all_seen_urls = set()
 
-    print(f"🔍 开始搜索: 「{keyword}」| 近 {days} 天 | 最多 {max_pages} 页")
+    print(f"开始搜索: {keyword} | 近 {days} 天 | 最多 {max_pages} 页")
 
     for page in range(max_pages):
         session.headers["User-Agent"] = random.choice(USER_AGENTS)
@@ -228,7 +227,7 @@ def search_baidu_news(keyword: str, days: int = 7, max_pages: int = 3, debug: bo
             })
 
             if blocked:
-                print(f"⚠️ 第 {page + 1} 页疑似被拦截，页面标题: {page_title}")
+                print(f"第 {page + 1} 页疑似被拦截")
                 if debug:
                     debug_info["pages"].append(page_debug)
                 if page < max_pages - 1:
@@ -236,7 +235,7 @@ def search_baidu_news(keyword: str, days: int = 7, max_pages: int = 3, debug: bo
                 continue
 
             all_results.extend(page_results)
-            print(f"📄 第 {page + 1} 页: {len(page_results)} 条（累计 {len(all_results)} 条）")
+            print(f"第 {page + 1} 页: {len(page_results)} 条")
 
             if debug:
                 debug_info["pages"].append(page_debug)
@@ -246,19 +245,19 @@ def search_baidu_news(keyword: str, days: int = 7, max_pages: int = 3, debug: bo
 
         except requests.RequestException as e:
             page_debug["request_error"] = str(e)
-            print(f"❌ 第 {page + 1} 页请求失败: {e}")
+            print(f"第 {page + 1} 页请求失败: {e}")
             if debug:
                 debug_info["pages"].append(page_debug)
             time.sleep(random.uniform(5, 10))
 
         except Exception as e:
             page_debug["parse_error"] = str(e)
-            print(f"❌ 第 {page + 1} 页解析失败: {e}")
+            print(f"第 {page + 1} 页解析失败: {e}")
             if debug:
                 debug_info["pages"].append(page_debug)
 
     debug_info["total_results"] = len(all_results)
-    print(f"✅ 搜索完成，共 {len(all_results)} 条")
+    print(f"搜索完成，共 {len(all_results)} 条")
 
     return all_results, debug_info if debug else None
 
@@ -298,7 +297,7 @@ def fetch_article_content(url: str, max_length: int = 500):
 
 def fetch_all_contents(results: list, max_length: int = 500):
     total = len(results)
-    print(f"📥 开始抓取正文（共 {total} 条）...")
+    print(f"开始抓取正文，共 {total} 条")
 
     for i, item in enumerate(results):
         print(f"  [{i + 1}/{total}] {item['title'][:30]}...")
@@ -309,6 +308,5 @@ def fetch_all_contents(results: list, max_length: int = 500):
         if i < total - 1:
             random_delay(1, 3)
 
-    print("✅ 正文抓取完成")
+    print("正文抓取完成")
     return results
-ENDOFFILE
